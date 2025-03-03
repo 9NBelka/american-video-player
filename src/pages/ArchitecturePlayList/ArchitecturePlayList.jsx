@@ -1,72 +1,97 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../../firebase.js'; // Импортируем Firestore
-import { collection, getDocs, doc, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore'; // Добавляем функции Firestore
-import './ArchitecturePlayList.css'; // Подключаем стили
+import { db, auth } from '../../firebase.js'; // Импортируем и auth, и db
+import { collection, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
+import './ArchitecturePlayList.css';
 
 export default function ArchitecturePlayList() {
-  const [videoUrl, setVideoUrl] = useState(''); // Состояние для текущего видео (ссылка для iframe)
-  const [modules, setModules] = useState([]); // Состояние для данных из Firebase
-  const [expandedModule, setExpandedModule] = useState(null); // Для управления раскрытием модулей
-  const [completedLessons, setCompletedLessons] = useState({}); // Состояние для отслеживания просмотренных уроков (ключ — ID модуля, значение — массив индексов уроков)
+  const [videoUrl, setVideoUrl] = useState('');
+  const [modules, setModules] = useState([]);
+  const [expandedModule, setExpandedModule] = useState(null);
+  const [completedLessons, setCompletedLessons] = useState({});
+  const [hasAccess, setHasAccess] = useState(false); // Состояние для отслеживания доступа
+  const [loading, setLoading] = useState(true); // Состояние загрузки
 
-  // Загрузка данных из Firestore при монтировании компонента
+  // Проверка роли пользователя и загрузка данных
   useEffect(() => {
-    const fetchData = async () => {
+    const checkUserRoleAndLoadData = async () => {
+      const user = auth.currentUser;
+      if (!user) {
+        alert('Пожалуйста, войдите в систему.');
+        setLoading(false);
+        return;
+      }
+
       try {
-        const querySnapshot = await getDocs(collection(db, 'architecture-videos')); // Используем коллекцию architecture-videos
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        if (!userDoc.exists() || userDoc.data().role !== 'student') {
+          alert('Доступ закрыт. Приобретите курс, чтобы получить доступ.');
+          setLoading(false);
+          return;
+        }
+
+        // Если роль "student", загружаем данные пользователя и модулей
+        setHasAccess(true);
+
+        // Загружаем completedLessons для пользователя
+        const userData = userDoc.data();
+        setCompletedLessons(userData.completedLessons || {});
+
+        // Загружаем данные модулей
+        const querySnapshot = await getDocs(collection(db, 'architecture-videos'));
         const modulesData = querySnapshot.docs.map((doc) => ({
-          id: doc.id, // Сохраняем ID документа
-          moduleTitle: doc.data().moduleTitle, // Название модуля
-          links: doc.data().links || [], // Массив уроков с title, videoUrl и videoTime
+          id: doc.id,
+          moduleTitle: doc.data().moduleTitle,
+          links: doc.data().links || [],
         }));
 
-        // Сортировка модулей по числу в начале moduleTitle (например, "Модуль 1 - input" -> 1)
         const sortedModules = modulesData.sort((a, b) => {
           const getModuleNumber = (title) => {
-            const match = title.match(/Модуль (\d+)/); // Извлекаем число после "Модуль"
-            return match ? parseInt(match[1], 10) : 0; // Если числа нет, возвращаем 0
+            const match = title.match(/Модуль (\d+)/);
+            return match ? parseInt(match[1], 10) : 0;
           };
           return getModuleNumber(a.moduleTitle) - getModuleNumber(b.moduleTitle);
         });
 
         setModules(sortedModules);
-        // Устанавливаем первое видео по умолчанию (если есть)
         if (sortedModules.length > 0 && sortedModules[0].links.length > 0) {
-          setVideoUrl(sortedModules[0].links[0].videoUrl); // Устанавливаем первую ссылку как начальное видео
+          setVideoUrl(sortedModules[0].links[0].videoUrl);
         }
-
-        // Загружаем состояние просмотренных уроков (можно добавить чтение из Firestore, если сохраняем там)
-        // Пока просто инициализируем пустым объектом
       } catch (error) {
         console.error('Ошибка при загрузке данных:', error);
+      } finally {
+        setLoading(false);
       }
     };
-    fetchData();
-  }, [db]);
 
-  // Обработчик клика по уроку (ссылке)
+    checkUserRoleAndLoadData();
+  }, [auth, db]);
+
   const handleLessonClick = (videoUrl) => {
     setVideoUrl(videoUrl);
   };
 
-  // Обработчик для разворачивания/сворачивания модулей
   const toggleModule = (moduleIndex) => {
     setExpandedModule(expandedModule === moduleIndex ? null : moduleIndex);
   };
 
-  // Обработчик отметки урока как просмотренного
   const toggleLessonCompletion = async (moduleId, lessonIndex) => {
+    const user = auth.currentUser;
+    if (!user) return;
+
     setCompletedLessons((prev) => {
       const currentModuleLessons = prev[moduleId] || [];
       const newLessons = currentModuleLessons.includes(lessonIndex)
-        ? currentModuleLessons.filter((index) => index !== lessonIndex) // Убираем, если уже отмечено
-        : [...currentModuleLessons, lessonIndex]; // Добавляем, если не отмечено
+        ? currentModuleLessons.filter((index) => index !== lessonIndex)
+        : [...currentModuleLessons, lessonIndex];
 
-      // Сохраняем в Firestore (опционально, если нужно сохранять состояние)
-      const moduleRef = doc(db, 'architecture-videos', moduleId);
-      updateDoc(moduleRef, {
-        completedLessons: newLessons, // Сохраняем индексы просмотренных уроков в документе модуля
-      }).catch((error) => console.error('Ошибка при сохранении:', error));
+      // Обновляем данные в Firestore
+      const userRef = doc(db, 'users', user.uid);
+      updateDoc(userRef, {
+        completedLessons: {
+          ...prev,
+          [moduleId]: newLessons,
+        },
+      }).catch((error) => console.error('Ошибка при сохранении отметок:', error));
 
       return {
         ...prev,
@@ -75,7 +100,6 @@ export default function ArchitecturePlayList() {
     });
   };
 
-  // Подсчет просмотренных уроков в модуле
   const getCompletedCount = (moduleId, links) => {
     const completed = completedLessons[moduleId] || [];
     return {
@@ -84,15 +108,12 @@ export default function ArchitecturePlayList() {
     };
   };
 
-  // Подсчет общего времени модуля
   const getTotalDuration = (links) => {
     const totalMinutes = links.reduce((sum, lesson) => {
-      // Предполагаем, что videoTime — это строка или число в минутах (например, "10" или 10)
-      const time = parseInt(lesson.videoTime, 10) || 0; // Преобразуем в число, если не указано, считаем 0
-      return sum + (isNaN(time) ? 0 : time); // Исключаем NaN
+      const time = parseInt(lesson.videoTime, 10) || 0;
+      return sum + (isNaN(time) ? 0 : time);
     }, 0);
 
-    // Форматируем общее время (например, "58 мин" или "1 ч 30 мин")
     if (totalMinutes >= 60) {
       const hours = Math.floor(totalMinutes / 60);
       const minutes = totalMinutes % 60;
@@ -101,9 +122,17 @@ export default function ArchitecturePlayList() {
     return `${totalMinutes} мин`;
   };
 
+  // Рендерим компонент только после загрузки и проверки доступа
+  if (loading) {
+    return <div>Загрузка...</div>;
+  }
+
+  if (!hasAccess) {
+    return <div>Доступ закрыт</div>; // Или можно вернуть пустой элемент или сообщение (например, <div>Доступ закрыт</div>)
+  }
+
   return (
     <div className='playlist-container'>
-      {/* Левая часть — видео */}
       <div className='video-section'>
         {videoUrl ? (
           <iframe
@@ -118,8 +147,6 @@ export default function ArchitecturePlayList() {
           <p>Выберите урок для просмотра</p>
         )}
       </div>
-
-      {/* Правая часть — список модулей и уроков */}
       <div className='modules-section'>
         {modules.map((module, index) => {
           const { completed, total } = getCompletedCount(module.id, module.links);
@@ -128,7 +155,7 @@ export default function ArchitecturePlayList() {
           return (
             <div key={module.id} className='module'>
               <h3 onClick={() => toggleModule(index)} className='module-title'>
-                {module.moduleTitle} {/* Название модуля */}
+                {module.moduleTitle}
                 <span className='completion-count'>
                   {' '}
                   {completed}/{total} | {totalDuration}
@@ -142,18 +169,17 @@ export default function ArchitecturePlayList() {
                     return (
                       <li
                         key={lessonIndex}
-                        onClick={() => handleLessonClick(lesson.videoUrl)} // Клик по ссылке меняет видео
+                        onClick={() => handleLessonClick(lesson.videoUrl)}
                         className={`lesson ${isCompleted ? 'completed' : ''}`}>
                         <input
                           type='checkbox'
                           checked={isCompleted}
                           onChange={() => toggleLessonCompletion(module.id, lessonIndex)}
                         />
-                        {lesson.title} {/* Отображаем название урока */}
+                        {lesson.title}
                         {lesson.videoTime && (
                           <span className='lesson-time'>{lesson.videoTime} мин</span>
                         )}
-                        {/* Отображаем время урока */}
                       </li>
                     );
                   })}
